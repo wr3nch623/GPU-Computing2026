@@ -1,0 +1,6 @@
+CompileFlags:
+  Add:
+    - -isystem/usr/include/c++/13
+    - -isystem/usr/include/x86_64-linux-gnu/c++/13
+  Remove:
+    - -isystem*conda*
