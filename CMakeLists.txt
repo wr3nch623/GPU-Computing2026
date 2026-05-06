@@ -6,7 +6,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(include)
 
-add_executable(GPU-Computing2026 main.cpp)
+add_executable(GPU-Computing2026 main.cu)
 
 
 include(CTest)

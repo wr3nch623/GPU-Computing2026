@@ -9,6 +9,7 @@
 #include <sys/time.h>
 #include "include/mean.cpp"
 #include "include/debug.cpp"
+#include "kernels/kernel.cu"
 
 using namespace std;
 // Warmup iteration setup
@@ -137,7 +138,7 @@ struct COOStorage* matrix_parser(FILE* file, int* rows, int* cols, int* nnz){
 
 // TODO: Delete unnecessary comments and code snippets
 
-void parallel_cpu(float* results, COOStorage* coomatrix, float*lineRandomVector, int nnz){
+void parallel_cpu_coo(float* results, COOStorage* coomatrix, float*lineRandomVector, int nnz){
     #pragma omp parallel
     {
         #pragma omp for
@@ -151,6 +152,17 @@ void parallel_cpu(float* results, COOStorage* coomatrix, float*lineRandomVector,
 
 }
 
+void parallel_cpu_csr(int *row_ptr, int *col_idx, float *csr_val, int rows, float *x, float *y) {
+    #pragma omp parallel
+    {
+        #pragma omp for
+        for (int i = 0; i < rows; ++i) {
+            for (int j = row_ptr[i]; j < row_ptr[i + 1]; ++j) {
+                y[i] += csr_val[j] * x[col_idx[j]];
+            }
+        }
+    }
+}
 
 
 int main(int argc, char const *argv[])
@@ -205,49 +217,135 @@ int main(int argc, char const *argv[])
         lineRandomVector[i] = rand()%10; // TODO: bug in srand, no actual random values so need to fix.
     }
 
-    //for(int i = 0; i < nnz; i++){
-    //    printf("%d, %d, %f\n", coomatrix[i].arow, coomatrix[i].acol, coomatrix[i].aval);
-    //}
-
-    //debugPrintCOOMatric(coomatrix, rows, cols, nnz);
     // ----------------------------------------------------------------
     // - COO
     // ----------------------------------------------------------------
     float results[cols];
     memset(results, 0, cols * sizeof(float));
 
-    // CPU computation implementation with openmp
-    // TODO: do warmup cycles, compute bandwidth, cache miss and flops
-    //#pragma omp parallel
-    //{
-    //    #pragma omp for
-    //    for (int i = 0; i < nnz; i++) {
-    //        results[coomatrix[i].arow] += coomatrix[i].aval*lineRandomVector[coomatrix[i].acol];
-    //        //printf("DEBUG: %f * %f = %f  COMPLETE = %f\n", coomatrix[i].aval, lineRandomVector[coomatrix[i].acol], coomatrix[i].aval*lineRandomVector[coomatrix[i].acol], results[coomatrix[i].arow]);
-    //        //fflush(stdout);
-    //    }
-    //}i
+    // Sort COO for performance
+    // TODO: Find out why sorted COO on CPU is slower
+    //std::sort(coomatrix, coomatrix + nnz, compareCOO);
+
 
     // CPU Parallel COO implementation
     TIMER_DEF;
     double TIMER[NITER];
     for(int i = -WARMUP; i < NITER; i++){
+        memset(results, 0, cols * sizeof(float));
         TIMER_START;
-        parallel_cpu(results, coomatrix, lineRandomVector, nnz);
+        parallel_cpu_coo(results, coomatrix, lineRandomVector, nnz);
         TIMER_STOP;
 
         if(i>=0) TIMER[i] = TIMER_ELAPSED;
     }
 
-    double gtime = geometric_mean(TIMER, NITER+1);
-
+    double gtime = geometric_mean(TIMER, NITER);
     printf("geometric time %f\n", gtime);
 
-
     // TODO: implement COO computation for GPU
+    COOStorage* cudastorage;
+    cudaMalloc((void**)&cudastorage, sizeof(COOStorage) * nnz);
+    cudaMemcpy(cudastorage, coomatrix, sizeof(COOStorage) * nnz, cudaMemcpyHostToDevice);
+
+
+    // Checking if there are errors cause i don't trust NVIDIA to work without errors
+    cudaError_t err = cudaGetLastError();
+    printf("Error: %s\n", cudaGetErrorString(err));
+
+
+    // I save every results so that afterward i can check the results with the others to find computation errors
+    //float cudaCOOResults[cols];
+    //memset(cudaCOOResults, 0, cols * sizeof(float));
+    float* cudaCOOResults;
+    cudaMalloc((void**)&cudaCOOResults, sizeof(float) * cols);
+    cudaMemset(cudaCOOResults, 0, sizeof(float) * cols);
+
+    float* cudaRandomLineVector;
+    cudaMalloc((void**)&cudaRandomLineVector, sizeof(float) * cols);
+    cudaMemcpy(cudaRandomLineVector, lineRandomVector, sizeof(float) * cols, cudaMemcpyHostToDevice);
+
+    float* cudaCheckRes;
+    cudaCheckRes = (float*) malloc(sizeof(float) * cols);
+
+    double NVDA_COO_TIMER[NITER];
+
+    for(int i = -WARMUP; i < NITER; i++){
+        cudaMemset(cudaCOOResults, 0, sizeof(float) * cols);
+        TIMER_START;
+        COO_SpVM_NVDA<<<(int)(nnz + 127)/128, 128>>>(cudastorage, cudaRandomLineVector, cudaCOOResults, nnz);
+
+        err = cudaDeviceSynchronize();
+        printf("Error: %s\n", cudaGetErrorString(err));
+
+        TIMER_STOP;
+
+        if(i>=0) NVDA_COO_TIMER[i] = TIMER_ELAPSED;
+    }
+
+    bool check = true;
+    cudaDeviceSynchronize();
+    cudaMemcpy(cudaCheckRes, cudaCOOResults, sizeof(float)*cols, cudaMemcpyDeviceToHost);
+
+
+    err = cudaGetLastError();
+    printf("ErrorMEMCPY: %s\n", cudaGetErrorString(err));
+
+
+
+    for(int i = 0; i < cols; i++){
+        if(fabs(cudaCheckRes[i] - results[i]) > 5e-1){
+            check = false;
+
+            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i-1], results[i-1]);
+            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i], results[i]);
+            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i+1], results[i+1]);
+            break;
+        }
+    }
+
+    printf("checking res : %d\n", check);
+
+    err = cudaGetLastError();
+    printf("Error: %s\n", cudaGetErrorString(err));
+
+
+    err = cudaDeviceSynchronize();
+    printf("Error: %s\n", cudaGetErrorString(err));
+
+
+
+    double gtime_coo_nvda = geometric_mean(NVDA_COO_TIMER, NITER);
+    printf("geometric time %f\n", gtime_coo_nvda);
+
+
+    // Free memory cause now it is useless
+    cudaFree(cudastorage);
+
+    // ----------------------------------------------------------------
+    // - CSR
+    // ----------------------------------------------------------------
 
 
     createCSR(coomatrix, nnz, rows, csr_row, csr_col, csr_val);
+    float cpu_csr_results[cols];
+
+    memset(cpu_csr_results, 0, cols * sizeof(float));
+    double CPU_CSR_TIMER[NITER];
+
+    // Parallel CPU CSR
+
+
+    for(int i = -WARMUP; i < NITER; i++){
+        TIMER_START;
+        parallel_cpu_csr(csr_row, csr_col, csr_val, rows, lineRandomVector, cpu_csr_results);
+        TIMER_STOP;
+
+        if(i >= 0) CPU_CSR_TIMER[i] = TIMER_ELAPSED;
+    }
+
+    double gtime_csr_cpu = geometric_mean(CPU_CSR_TIMER, NITER);
+    printf("geometric time %f\n", gtime_csr_cpu);
 
 
 

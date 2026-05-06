@@ -2,5 +2,13 @@ CompileFlags:
   Add:
     - -isystem/usr/include/c++/13
     - -isystem/usr/include/x86_64-linux-gnu/c++/13
+    - -isystem/usr/local/cuda-12.6/include
+    - --cuda-path=/usr/local/cuda-12.6
+    - --cuda-gpu-arch=sm_86        # change to your GPU arch
+    - -x
+    - cuda
   Remove:
     - -isystem*conda*
+    - -forward-unknown-to-host-compiler
+    - --generate-code*
+    - --options-file*
