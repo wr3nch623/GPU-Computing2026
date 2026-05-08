@@ -4,6 +4,7 @@ project(GPU-Computing2026 VERSION 0.1.0 LANGUAGES CXX CUDA)
 set(CMAKE_CUDA_ARCHITECTURES 61)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+set(DCUDA_NVCC_FLAGS -allow-unsupported-compiler)
 include_directories(include)
 
 add_executable(GPU-Computing2026 main.cu)

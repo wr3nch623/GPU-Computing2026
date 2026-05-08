@@ -241,7 +241,7 @@ int main(int argc, char const *argv[])
     }
 
     double gtime = geometric_mean(TIMER, NITER);
-    printf("geometric time %f\n", gtime);
+    printf("geometric time cpu coo %f\n", gtime);
 
     // TODO: implement COO computation for GPU
     COOStorage* cudastorage;
@@ -316,7 +316,7 @@ int main(int argc, char const *argv[])
 
 
     double gtime_coo_nvda = geometric_mean(NVDA_COO_TIMER, NITER);
-    printf("geometric time %f\n", gtime_coo_nvda);
+    printf("geometric time coo nvda %f\n", gtime_coo_nvda);
 
 
     // Free memory cause now it is useless
@@ -334,8 +334,6 @@ int main(int argc, char const *argv[])
     double CPU_CSR_TIMER[NITER];
 
     // Parallel CPU CSR
-
-
     for(int i = -WARMUP; i < NITER; i++){
         TIMER_START;
         parallel_cpu_csr(csr_row, csr_col, csr_val, rows, lineRandomVector, cpu_csr_results);
@@ -345,33 +343,87 @@ int main(int argc, char const *argv[])
     }
 
     double gtime_csr_cpu = geometric_mean(CPU_CSR_TIMER, NITER);
-    printf("geometric time %f\n", gtime_csr_cpu);
+    printf("geometric time csr cpu  %f\n", gtime_csr_cpu);
 
 
 
-    //std::sort(coomatrix, coomatrix + nnz, compareCOOByRow);
+    float* cudaCSRResults;
+    cudaMalloc((void**)&cudaCSRResults, sizeof(float) * cols);
+    cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
 
-    //for(int i = 0; i < cols; i++){
-    //    printf("%f ", results[i]);
-    //}
-    //printf("\n");
-    //int counter = 0;
-    //for (int i = 0; i < rows; i++) {
-    //    for (int j = 0; j < cols; j++) {
-    //        if (coomatrix[i].arow == i && coomatrix[i].acol == j)
-    //            printf("%f ", coomatrix[i].aval);
-    //        else
-    //            printf("0 ");
-    //        counter++;
-    //    }
-    //    printf("\n");
+    cudaMemcpy(cudaRandomLineVector, lineRandomVector, sizeof(float) * cols, cudaMemcpyHostToDevice);
 
-    //}
+    // Allocation of csr vectors onto CUDA and copy
+    int *cudacsr_row, *cudacsr_col;
+    float *cudacsr_val;
+    cudaMalloc((void**)&cudacsr_row, sizeof(int) * (rows+1));
+    cudaMalloc((void**)&cudacsr_col, sizeof(int) * nnz);
+    cudaMalloc((void**)&cudacsr_val, sizeof(float) * nnz);
 
-    //for (int i = 0; i < nnz; i++) {
-    //    printf("%f ", lineRandomVector[i]);
-    //}
-    //printf("\n");
+    cudaMemcpy(cudacsr_row, csr_row, sizeof(int) * (rows+1), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudacsr_col, csr_col, sizeof(int) * (nnz), cudaMemcpyHostToDevice);
+    cudaMemcpy(cudacsr_val, csr_val, sizeof(float) * (nnz), cudaMemcpyHostToDevice);
+
+    double NVDA_CSR_TIMER[NITER];
+
+    for(int i = -WARMUP; i < NITER; i++){
+        cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
+        TIMER_START;
+        CSR_SpVM_NVDA<<<(int)(cols+31 / 32), 32>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+
+        err = cudaDeviceSynchronize();
+
+        //printf("Error: %s\n", cudaGetErrorString(err));
+
+        TIMER_STOP;
+
+        if(i>=0) NVDA_CSR_TIMER[i] = TIMER_ELAPSED;
+    }
+
+    check = true;
+    cudaDeviceSynchronize();
+    cudaMemcpy(cudaCheckRes, cudaCSRResults, sizeof(float)*cols, cudaMemcpyDeviceToHost);
+
+
+    err = cudaGetLastError();
+    printf("ErrorMEMCPYCSR: %s\n", cudaGetErrorString(err));
+
+
+
+    for(int i = 0; i < cols; i++){
+        if(fabs(cudaCheckRes[i] - results[i]) > 5e-1){
+            check = false;
+
+            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i-1], results[i-1]);
+            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i], results[i]);
+            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i+1], results[i+1]);
+            break;
+        }
+    }
+
+    printf("checking res : %d\n", check);
+
+    err = cudaGetLastError();
+    printf("Error: %s\n", cudaGetErrorString(err));
+
+
+    err = cudaDeviceSynchronize();
+    printf("Error: %s\n", cudaGetErrorString(err));
+
+
+
+    double gtime_csr_nvda = geometric_mean(NVDA_CSR_TIMER, NITER);
+    printf("geometric time csr nvda %f\n", gtime_csr_nvda);
+
+    for(int i = 0; i < NITER; i++){
+        printf("%f ", NVDA_CSR_TIMER[i]);
+    }
+    printf("\n");
+
+
+
+
+
 
     //cudaFree(coomatrix);
     // Closing and freeing a bunch of stuff to avoid memory leaks and making valgrind happy

@@ -7,14 +7,25 @@ Implemented:
   - COO OpenMP computation
   - COO NVIDIA
 - CSR
+  - CSR OpenMP
+  - NVIDIA
 
 Missing:
 - COO
   - cuSparse 
 - CSR
-  - CSR OpemMP computation
-  - nvidia kernel computation
   - cuSparse
+  - CSR Vector
+  - Other stride accesses or warp parallelism implementation
+  
+  - Fix code
+  - Write documentation and compilation guide 
+
+  
+Possible optimization:
+    - Stride 
+    - async memory copy
+    - directly using warps
   
 - Bandwidth computation
 - flops computation

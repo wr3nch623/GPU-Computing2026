@@ -52,3 +52,27 @@ We don't use OS virtual memory, triggering the transfer with the DMA, so the cop
 
 
 We can sync at the warp level. With warp-centric operation we look at shuffling, which is a communication pattern to mode data across threads.:w
+
+
+
+
+
+# Async exec
+we assign a tile to a block, to then be reduced when i go down in the hierarchy. For CSR you can map rows into thread to perform computation  
+
+Work stealing is threads doing work of other threads which are doing computations, easier for multicore architectures no gpu per se, you have to do some fancy patterns for that.
+
+fine grained correspond to small tasks but high synchronization. 
+
+You can parallelize task that can be executed in parallel with different degrees of parallelization. You try to saturate the dependency to then maximise the efficiency
+
+If the matrix has different types of sparsity you can devise access patterns around it
+
+
+Colloc free algorithms to fix concurrent access that could impact performance on atomic stuff
+
+## Task parallelism for GPU
+We want to execute concurrent kernels at the same time if possible, or perform sub operations in the same kernel. This is hard because you need a fine grain control which is hard. 
+
+
+
