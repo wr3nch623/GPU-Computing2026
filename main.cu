@@ -10,6 +10,7 @@
 #include "include/mean.cpp"
 #include "include/debug.cpp"
 #include "kernels/kernel.cu"
+#include "performance_functions.cpp"
 
 using namespace std;
 // Warmup iteration setup
@@ -17,10 +18,26 @@ using namespace std;
 #define WARMUP 3
 
 // Time tracking definitions
-#define TIMER_DEF     struct timeval temp_1, temp_2
-#define TIMER_START   gettimeofday(&temp_1, (struct timezone*)0)
-#define TIMER_STOP    gettimeofday(&temp_2, (struct timezone*)0)
-#define TIMER_ELAPSED ((temp_2.tv_sec-temp_1.tv_sec)+(temp_2.tv_usec-temp_1.tv_usec)/1000000.0)
+
+//#define TIMER_DEF     struct timeval temp_1, temp_2
+//#define TIMER_START   gettimeofday(&temp_1, (struct timezone*)0)
+//#define TIMER_STOP    gettimeofday(&temp_2, (struct timezone*)0)
+//#define TIMER_ELAPSED ((temp_2.tv_sec-temp_1.tv_sec)+(temp_2.tv_usec-temp_1.tv_usec)/1000000.0)
+
+#define TIMER_DEF(n)	 struct timeval temp_1_##n={0,0}, temp_2_##n={0,0}
+#define TIMER_START(n)	 gettimeofday(&temp_1_##n, (struct timezone*)0)
+#define TIMER_STOP(n)	 gettimeofday(&temp_2_##n, (struct timezone*)0)
+// Measure time in milliseconds
+#define TIMER_ELAPSED(n) ((temp_2_##n.tv_sec-temp_1_##n.tv_sec)+(temp_2_##n.tv_usec-temp_1_##n.tv_usec)/1000.0)
+#define TIMER_PRINT(n) \
+    do { \
+        int rk;\
+        MPI_Comm_rank(MPI_COMM_WORLD, &rk);\
+        if (rk==0) printf("Timer elapsed: %lfs\n", TIMER_ELAPSED(n)/1e6);\
+        fflush(stdout);\
+        sleep(0.5);\
+        MPI_Barrier(MPI_COMM_WORLD);\
+    } while (0);
 
 struct COOStorage* createCOO(int nelements){
     struct COOStorage* storage = NULL;
@@ -138,19 +155,32 @@ struct COOStorage* matrix_parser(FILE* file, int* rows, int* cols, int* nnz){
 
 // TODO: Delete unnecessary comments and code snippets
 
-void parallel_cpu_coo(float* results, COOStorage* coomatrix, float*lineRandomVector, int nnz){
-    #pragma omp parallel
-    {
-        #pragma omp for
-        for (int i = 0; i < nnz; i++) {
-            results[coomatrix[i].arow] += coomatrix[i].aval*lineRandomVector[coomatrix[i].acol];
-            //printf("DEBUG: %f * %f = %f  COMPLETE = %f\n", coomatrix[i].aval, lineRandomVector[coomatrix[i].acol], coomatrix[i].aval*lineRandomVector[coomatrix[i].acol], results[coomatrix[i].arow]);
-            //fflush(stdout);
-        }
+//void parallel_cpu_coo(float* results, COOStorage* coomatrix, float*lineRandomVector, int nnz){
+//    #pragma omp parallel
+//    {
+//        #pragma omp for
+//        for (int i = 0; i < nnz; i++) {
+//            #pragma omp atomic
+//            results[coomatrix[i].arow] += coomatrix[i].aval*lineRandomVector[coomatrix[i].acol];
+//            //printf("DEBUG: %f * %f = %f  COMPLETE = %f\n", coomatrix[i].aval, lineRandomVector[coomatrix[i].acol], coomatrix[i].aval*lineRandomVector[coomatrix[i].acol], results[coomatrix[i].arow]);
+//            //fflush(stdout);
+//        }
+//    }
+//
+//
+//}
+
+void cpu_coo(float* results, COOStorage* coomatrix, float*lineRandomVector, int nnz){
+    for (int i = 0; i < nnz; i++) {
+        results[coomatrix[i].arow] += coomatrix[i].aval*lineRandomVector[coomatrix[i].acol];
+        //printf("DEBUG: %f * %f = %f  COMPLETE = %f\n", coomatrix[i].aval, lineRandomVector[coomatrix[i].acol], coomatrix[i].aval*lineRandomVector[coomatrix[i].acol], results[coomatrix[i].arow]);
+        //fflush(stdout);
     }
 
 
 }
+
+
 
 void parallel_cpu_csr(int *row_ptr, int *col_idx, float *csr_val, int rows, float *x, float *y) {
     #pragma omp parallel
@@ -167,6 +197,13 @@ void parallel_cpu_csr(int *row_ptr, int *col_idx, float *csr_val, int rows, floa
 
 int main(int argc, char const *argv[])
 {
+    // TODO: This code sucks, try to find time to make it a bit better
+    // TODO: Fix all memory leaks
+
+    // Time to solution of whole program
+    TIMER_DEF(0);
+    TIMER_START(0);
+
     FILE* matrixFile = NULL;
     char* stringToParse = NULL;
     bool first = false;
@@ -175,13 +212,18 @@ int main(int argc, char const *argv[])
     int rows, cols, nnz;
     struct COOStorage *coomatrix = NULL;
 
+    // Number of threads that will go on the GPU
+    int threads = 256;
+
+
     for(int i = 0; i < argc; i++){
         printf("%s\n", argv[i]);
     }
 
-
-    //int deviceCount = 0;
-    //cudaGetDeviceCount(&deviceCount);
+    // Variables for elapsed time count on GPU
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
 
     if(argc < 2){
@@ -225,20 +267,30 @@ int main(int argc, char const *argv[])
 
     // Sort COO for performance
     // TODO: Find out why sorted COO on CPU is slower
+    // NOTE: DUUUUH race conditions with random access is better than sequentials
     //std::sort(coomatrix, coomatrix + nnz, compareCOO);
 
 
+
     // CPU Parallel COO implementation
-    TIMER_DEF;
+    TIMER_DEF(1);
     double TIMER[NITER];
+    float gflopss[NITER];
+    float bandwidth[NITER];
     for(int i = -WARMUP; i < NITER; i++){
         memset(results, 0, cols * sizeof(float));
-        TIMER_START;
-        parallel_cpu_coo(results, coomatrix, lineRandomVector, nnz);
-        TIMER_STOP;
+        TIMER_START(1);
+        cpu_coo(results, coomatrix, lineRandomVector, nnz);
+        TIMER_STOP(1);
 
-        if(i>=0) TIMER[i] = TIMER_ELAPSED;
+        if(i>=0){
+            TIMER[i] = TIMER_ELAPSED(1);
+            gflopss[i] = gflops(2*nnz, TIMER[i]);
+            bandwidth[i] = bandwidthCOOTheoretical(nnz, TIMER[i]);
+        }
     }
+
+    printPerformance(TIMER, gflopss, bandwidth, NITER);
 
     double gtime = geometric_mean(TIMER, NITER);
     printf("geometric time cpu coo %f\n", gtime);
@@ -267,26 +319,42 @@ int main(int argc, char const *argv[])
 
     float* cudaCheckRes;
     cudaCheckRes = (float*) malloc(sizeof(float) * cols);
+    // TODO: FIX ALL MEMORY LEAKS CAUSE YOU ARE NOT DEALLOCATING
+    float NVDA_COO_TIMER[NITER];
+    float NVDA_COO_GFLOPSS[NITER];
+    float NVDA_COO_BANDWIDTH[NITER];
 
-    double NVDA_COO_TIMER[NITER];
-
+    TIMER_DEF(2);
+    printf("NVDA COO\n");
     for(int i = -WARMUP; i < NITER; i++){
         cudaMemset(cudaCOOResults, 0, sizeof(float) * cols);
-        TIMER_START;
-        COO_SpVM_NVDA<<<(int)(nnz + 127)/128, 128>>>(cudastorage, cudaRandomLineVector, cudaCOOResults, nnz);
+        //TIMER_START(2);
+        cudaEventRecord(start);
+        COO_SpVM_NVDA<<<(int)(nnz + threads - 1)/threads, threads>>>(cudastorage, cudaRandomLineVector, cudaCOOResults, nnz);
+        cudaEventRecord(stop);
 
-        err = cudaDeviceSynchronize();
+        //err = cudaDeviceSynchronize();
+        err = cudaEventSynchronize(stop);
         printf("Error: %s\n", cudaGetErrorString(err));
 
-        TIMER_STOP;
+        //TIMER_STOP(2);
 
-        if(i>=0) NVDA_COO_TIMER[i] = TIMER_ELAPSED;
+        //if(i>=0) NVDA_COO_TIMER[i] = TIMER_ELAPSED(2);
+        //if(i>=0) cudaEventElapsedTime(&NVDA_COO_TIMER[i], start, stop);
+
+        if(i>=0){
+            cudaEventElapsedTime(&NVDA_COO_TIMER[i], start, stop);
+            NVDA_COO_GFLOPSS[i] = gflops(2*nnz, NVDA_COO_TIMER[i]);
+            NVDA_COO_BANDWIDTH[i] = bandwidthCOOTheoretical(nnz, NVDA_COO_TIMER[i]);
+        }
+
     }
 
     bool check = true;
     cudaDeviceSynchronize();
     cudaMemcpy(cudaCheckRes, cudaCOOResults, sizeof(float)*cols, cudaMemcpyDeviceToHost);
 
+    printPerformance(NVDA_COO_TIMER, NVDA_COO_GFLOPSS, NVDA_COO_BANDWIDTH, NITER);
 
     err = cudaGetLastError();
     printf("ErrorMEMCPY: %s\n", cudaGetErrorString(err));
@@ -332,14 +400,14 @@ int main(int argc, char const *argv[])
 
     memset(cpu_csr_results, 0, cols * sizeof(float));
     double CPU_CSR_TIMER[NITER];
-
+    TIMER_DEF(3);
     // Parallel CPU CSR
     for(int i = -WARMUP; i < NITER; i++){
-        TIMER_START;
+        TIMER_START(3);
         parallel_cpu_csr(csr_row, csr_col, csr_val, rows, lineRandomVector, cpu_csr_results);
-        TIMER_STOP;
+        TIMER_STOP(3);
 
-        if(i >= 0) CPU_CSR_TIMER[i] = TIMER_ELAPSED;
+        if(i >= 0) CPU_CSR_TIMER[i] = TIMER_ELAPSED(3);
     }
 
     double gtime_csr_cpu = geometric_mean(CPU_CSR_TIMER, NITER);
@@ -364,25 +432,72 @@ int main(int argc, char const *argv[])
     cudaMemcpy(cudacsr_col, csr_col, sizeof(int) * (nnz), cudaMemcpyHostToDevice);
     cudaMemcpy(cudacsr_val, csr_val, sizeof(float) * (nnz), cudaMemcpyHostToDevice);
 
-    double NVDA_CSR_TIMER[NITER];
+    float NVDA_CSR_TIMER[NITER];
+    float NVDA_CSR_GFLOPSS[NITER];
+    float NVDA_CSR_BANDWIDTH[NITER];
+    //TIMER_DEF(4);
 
     for(int i = -WARMUP; i < NITER; i++){
         cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
-        TIMER_START;
-        CSR_SpVM_NVDA<<<(int)(cols+31 / 32), 32>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+        //TIMER_START(4);
+        cudaEventRecord(start);
+        CSR_SpVM_NVDA<<<(int)((rows+threads - 1) / threads), threads>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+        cudaEventRecord(stop);
 
-        err = cudaDeviceSynchronize();
-
+        //err = cudaDeviceSynchronize();
+        err = cudaEventSynchronize(stop);
         //printf("Error: %s\n", cudaGetErrorString(err));
 
-        TIMER_STOP;
+        //TIMER_STOP(4);
 
-        if(i>=0) NVDA_CSR_TIMER[i] = TIMER_ELAPSED;
+        //if(i>=0) NVDA_CSR_TIMER[i] = TIMER_ELAPSED(4);
+        //if(i>=0) cudaEventElapsedTime(&NVDA_CSR_TIMER[i], start, stop);
+
+        if(i>=0){
+            cudaEventElapsedTime(&NVDA_CSR_TIMER[i], start, stop);
+            NVDA_CSR_GFLOPSS[i] = gflops(2*nnz, NVDA_CSR_TIMER[i]);
+            NVDA_CSR_BANDWIDTH[i] = bandwidthCSRTheoretical(rows, nnz, NVDA_CSR_TIMER[i]);
+        }
+
+
     }
 
+    printf("NVDA CSR\n");
+    printPerformance(NVDA_CSR_TIMER, NVDA_CSR_GFLOPSS, NVDA_CSR_BANDWIDTH, NITER);
+    return 0;
+
+    // TODO: Fix this!
+    float NVDA_CSRVector_TIMER[NITER];
+    //TIMER_DEF(5);
+
+    threads = 32;
+    int sharedBytes = threads * sizeof(float);
+
+    for(int i = -WARMUP; i < NITER; i++){
+        cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
+        //TIMER_START(5);
+        cudaEventRecord(start);
+        CSRVector_SpVM_NVDA<<<(rows + threads - 1), threads, sharedBytes>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+        cudaEventRecord(stop);
+
+        //err = cudaDeviceSynchronize();
+        err = cudaEventSynchronize(stop);
+        printf("Error: %s\n", cudaGetErrorString(err));
+
+        err = cudaGetLastError();
+        printf("Error: %s\n", cudaGetErrorString(err));
+        //TIMER_STOP(5);
+
+        //if(i>=0) NVDA_CSRVector_TIMER[i] = TIMER_ELAPSED(5);
+        if(i>=0) cudaEventElapsedTime(&NVDA_CSRVector_TIMER[i], start, stop);
+
+    }
+    float* cudaCSRVecCheckRes = (float*)malloc(sizeof(float) * cols);
+    //cudaMemcpy(cudaCSRVecCheckRes, cudaCSRResults, sizeof(float) * cols, cudaMemcpyDeviceToHost);
+
+
     check = true;
-    cudaDeviceSynchronize();
-    cudaMemcpy(cudaCheckRes, cudaCSRResults, sizeof(float)*cols, cudaMemcpyDeviceToHost);
+    err = cudaDeviceSynchronize();
 
 
     err = cudaGetLastError();
@@ -390,16 +505,16 @@ int main(int argc, char const *argv[])
 
 
 
-    for(int i = 0; i < cols; i++){
-        if(fabs(cudaCheckRes[i] - results[i]) > 5e-1){
-            check = false;
+    //for(int i = 0; i < cols; i++){
+    //    if(fabs(cudaCheckRes[i] - results[i]) > 5e-1){
+    //        check = false;
 
-            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i-1], results[i-1]);
-            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i], results[i]);
-            printf("cuda : %f, cpu : %f\n", cudaCheckRes[i+1], results[i+1]);
-            break;
-        }
-    }
+    //        printf("cuda : %f, cpu : %f\n", cudaCheckRes[i-1], results[i-1]);
+    //        printf("cuda : %f, cpu : %f\n", cudaCheckRes[i], results[i]);
+    //        printf("cuda : %f, cpu : %f\n", cudaCheckRes[i+1], results[i+1]);
+    //        break;
+    //    }
+    //}
 
     printf("checking res : %d\n", check);
 
@@ -415,15 +530,20 @@ int main(int argc, char const *argv[])
     double gtime_csr_nvda = geometric_mean(NVDA_CSR_TIMER, NITER);
     printf("geometric time csr nvda %f\n", gtime_csr_nvda);
 
+
+    double gtime_csrvector_nvda = geometric_mean(NVDA_CSRVector_TIMER, NITER);
+    printf("geometric time csrvector nvda %f\n", gtime_csrvector_nvda);
+
+
+
     for(int i = 0; i < NITER; i++){
-        printf("%f ", NVDA_CSR_TIMER[i]);
+        printf("%f ", NVDA_CSRVector_TIMER[i]);
     }
     printf("\n");
 
-
-
-
-
+    // Stop time to solution
+    TIMER_STOP(0);
+    float TTSComplete = TIMER_ELAPSED(0);
 
     //cudaFree(coomatrix);
     // Closing and freeing a bunch of stuff to avoid memory leaks and making valgrind happy

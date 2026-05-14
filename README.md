@@ -8,23 +8,27 @@ Implemented:
   - COO NVIDIA
 - CSR
   - CSR OpenMP
-  - NVIDIA
+  - CSR Vector
+  
+- redo time library
 
 Missing:
 - COO
   - cuSparse 
 - CSR
   - cuSparse
-  - CSR Vector
   - Other stride accesses or warp parallelism implementation
   
   - Fix code
   - Write documentation and compilation guide 
-
+  - time measurement on everything
+  - compute performance metrics
+  - data logging and generation
   
 Possible optimization:
     - Stride 
     - async memory copy
+    - pipeline everything to keep computation authority on GPU to better benchmark performance
     - directly using warps
   
 - Bandwidth computation

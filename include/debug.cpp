@@ -42,3 +42,15 @@ void print_csr_matrix(int *csr_row, int *csr_col, float *csr_val, int rows, int 
     printf("\n");
     }
 }
+
+void printPerformance(double* TIMER, float* gflopss, float* bandwidth, int NITER){
+    for(int i = 0; i < NITER; i++){
+        printf("time %f, gflopss %f, bandwidth %f\n", TIMER[i], gflopss[i], bandwidth[i]);
+    }
+}
+
+void printPerformance(float* TIMER, float* gflopss, float* bandwidth, int NITER){
+    for(int i = 0; i < NITER; i++){
+        printf("time %f, gflopss %f, bandwidth %f\n", TIMER[i], gflopss[i], bandwidth[i]);
+    }
+}
