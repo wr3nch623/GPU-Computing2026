@@ -464,20 +464,21 @@ int main(int argc, char const *argv[])
 
     printf("NVDA CSR\n");
     printPerformance(NVDA_CSR_TIMER, NVDA_CSR_GFLOPSS, NVDA_CSR_BANDWIDTH, NITER);
-    return 0;
 
     // TODO: Fix this!
     float NVDA_CSRVector_TIMER[NITER];
+    float NVDA_CSRVector_GFLOPSS[NITER];
+    float NVDA_CSRVector_BANDWIDTH[NITER];
     //TIMER_DEF(5);
 
-    threads = 32;
+    int WPP = threads / 32;
     int sharedBytes = threads * sizeof(float);
 
     for(int i = -WARMUP; i < NITER; i++){
         cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
         //TIMER_START(5);
         cudaEventRecord(start);
-        CSRVector_SpVM_NVDA<<<(rows + threads - 1), threads, sharedBytes>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+        CSRVector_SpVM_NVDA<<<(rows + WPP - 1)/WPP, threads, sharedBytes>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
         cudaEventRecord(stop);
 
         //err = cudaDeviceSynchronize();
@@ -489,12 +490,23 @@ int main(int argc, char const *argv[])
         //TIMER_STOP(5);
 
         //if(i>=0) NVDA_CSRVector_TIMER[i] = TIMER_ELAPSED(5);
-        if(i>=0) cudaEventElapsedTime(&NVDA_CSRVector_TIMER[i], start, stop);
+        //if(i>=0) cudaEventElapsedTime(&NVDA_CSRVector_TIMER[i], start, stop);
+
+
+        if(i>=0){
+            cudaEventElapsedTime(&NVDA_CSRVector_TIMER[i], start, stop);
+            NVDA_CSRVector_GFLOPSS[i] = gflops(2*nnz, NVDA_CSRVector_TIMER[i]);
+            NVDA_CSRVector_BANDWIDTH[i] = bandwidthCSRTheoretical(rows, nnz, NVDA_CSRVector_TIMER[i]);
+        }
+
+
 
     }
     float* cudaCSRVecCheckRes = (float*)malloc(sizeof(float) * cols);
     //cudaMemcpy(cudaCSRVecCheckRes, cudaCSRResults, sizeof(float) * cols, cudaMemcpyDeviceToHost);
 
+    printPerformance(NVDA_CSRVector_TIMER, NVDA_CSRVector_GFLOPSS, NVDA_CSRVector_BANDWIDTH, NITER);
+    return 0;
 
     check = true;
     err = cudaDeviceSynchronize();
