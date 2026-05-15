@@ -8,5 +8,6 @@
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
-module load cuda/12.4
-./execute.sh
+#SBATCH --nodelist=edu01
+module load CUDA
+bash execute.sh

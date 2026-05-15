@@ -75,7 +75,6 @@ struct COOStorage* matrix_parser(FILE* file, int* rows, int* cols, int* nnz){
     float arr[3];
     struct COOStorage* coomatrix;
     int i = 0;
-
     // Read file
     while(fgets(tempString, 10000, file)){
         int k, h;
@@ -122,7 +121,6 @@ struct COOStorage* matrix_parser(FILE* file, int* rows, int* cols, int* nnz){
 
         }
     }
-
     return coomatrix;
 
 }

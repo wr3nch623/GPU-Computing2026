@@ -226,13 +226,11 @@ int main(int argc, char const *argv[])
     // Parse the matrix given as path in input.
     coomatrix = matrix_parser(matrixFile, &rows, &cols, &nnz);
 
-
     // CSR Implementation
     int *csr_row = (int*)std::calloc(rows+1, sizeof(int));
     int *csr_col = (int*)std::calloc(nnz, sizeof(int));
     float *csr_val = (float*)std::calloc(nnz, sizeof(float));
-
-    // Allocate random vector and populate it with random variables.
+    // Allocate random vector and populate it with random variables
     lineRandomVector = (float*)malloc(sizeof(float)*rows);
     for(int i = 0; i < rows; i++){
         lineRandomVector[i] = rand()%10; // TODO: bug in srand, no actual random values so need to fix.
@@ -241,8 +239,9 @@ int main(int argc, char const *argv[])
     // ----------------------------------------------------------------
     // - COO
     // ----------------------------------------------------------------
-    float results[cols];
-    memset(results, 0, cols * sizeof(float));
+    float* results;
+    results = (float*)malloc(sizeof(float) * rows);
+    memset(results, 0, rows * sizeof(float));
 
     // Sort COO
     std::sort(coomatrix, coomatrix + nnz, compareCOOByRow);
@@ -250,6 +249,7 @@ int main(int argc, char const *argv[])
 
 
     // CPU Parallel COO implementation
+    printf("CPU COO");
     TIMER_DEF(1);
     float TIMER[NITER];
     float gflopss[NITER];
@@ -276,6 +276,7 @@ int main(int argc, char const *argv[])
     double gtime = geometric_mean(TIMER, NITER);
     printf("geometric time cpu coo %f\n", gtime);
 
+    printf("before segfaults\n");
     // TODO: implement COO computation for GPU
     COOStorage* cudastorage;
     cudaCheckError(cudaMalloc((void**)&cudastorage, sizeof(COOStorage) * nnz));
@@ -284,7 +285,6 @@ int main(int argc, char const *argv[])
 
     // Checking if there are errors cause i don't trust NVIDIA to work without errors
     cudaError_t err = cudaGetLastError();
-    printf("Error: %s\n", cudaGetErrorString(err));
 
 
     // I save every results so that afterward i can check the results with the others to find computation errors
@@ -297,6 +297,7 @@ int main(int argc, char const *argv[])
     float* cudaRandomLineVector;
     cudaMalloc((void**)&cudaRandomLineVector, sizeof(float) * cols);
     cudaMemcpy(cudaRandomLineVector, lineRandomVector, sizeof(float) * cols, cudaMemcpyHostToDevice);
+
 
     float* cudaCheckRes;
     cudaCheckRes = (float*) malloc(sizeof(float) * cols);
@@ -479,9 +480,10 @@ int main(int argc, char const *argv[])
     // TODO: compute mean squared error or root mean squared error on the results for everyone
 
     createCSR(coomatrix, nnz, rows, csr_row, csr_col, csr_val);
-    float cpu_csr_results[cols];
+    float* cpu_csr_results;
+    cpu_csr_results = (float*)malloc(sizeof(float)*rows);
 
-    memset(cpu_csr_results, 0, cols * sizeof(float));
+    memset(cpu_csr_results, 0, rows * sizeof(float));
     float CPU_CSR_TIMER[NITER];
     float CPU_CSR_GFLOPSS[NITER];
     float CPU_CSR_BANDWIDTH[NITER];
