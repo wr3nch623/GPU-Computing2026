@@ -8,6 +8,7 @@ set(DCUDA_NVCC_FLAGS -allow-unsupported-compiler)
 include_directories(include)
 
 add_executable(GPU-Computing2026 main.cu)
+target_link_libraries(GPU-Computing2026 cusparse)
 
 
 include(CTest)

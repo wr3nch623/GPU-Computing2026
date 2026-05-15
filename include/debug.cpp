@@ -1,6 +1,7 @@
 
 #include "types.cpp"
 #include <stdio.h>
+#include <cmath>
 
 // TODO: put this in a function
 void yetAnotherDebugFunc(struct COOStorage *coomatrix, int nnz){
@@ -53,4 +54,18 @@ void printPerformance(float* TIMER, float* gflopss, float* bandwidth, int NITER)
     for(int i = 0; i < NITER; i++){
         printf("time %f, gflopss %f, bandwidth %f\n", TIMER[i], gflopss[i], bandwidth[i]);
     }
+}
+
+float stddev(float* arr, int niters){
+    float mean = 0, var = 0;
+    for(int i = 0; i < niters; i++){
+        mean += arr[i];
+    }
+    mean /= niters;
+
+    for(int i = 0; i < niters; i++){
+        var += (arr[i] - mean) * (arr[i] - mean);
+    }
+
+    return sqrt(var/(niters-1));
 }

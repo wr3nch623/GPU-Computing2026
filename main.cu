@@ -11,6 +11,7 @@
 #include "include/debug.cpp"
 #include "kernels/kernel.cu"
 #include "performance_functions.cpp"
+#include <cusparse.h>
 
 using namespace std;
 // Warmup iteration setup
@@ -38,6 +39,20 @@ using namespace std;
         sleep(0.5);\
         MPI_Barrier(MPI_COMM_WORLD);\
     } while (0);
+
+// TODO: Probably delete this macro
+#define cudaCheckError(val) check((val), #val, __FILE__, __LINE__)
+void check(cudaError_t err, char const* func, char const* file, int line)
+{
+    if (err != cudaSuccess)
+    {
+        std::cerr << "CUDA Runtime Error at: " << file << ":" << line
+                  << std::endl;
+        std::cerr << cudaGetErrorString(err) << " " << func << std::endl;
+        // We don't exit when we encounter CUDA errors in this example.
+        // std::exit(EXIT_FAILURE);
+    }
+}
 
 struct COOStorage* createCOO(int nelements){
     struct COOStorage* storage = NULL;
@@ -69,8 +84,9 @@ bool compareCOOByRow(const COOStorage &a, const COOStorage &b){
 void createCSR(COOStorage* coostorage, int nelements, int rows,
                int *csr_row, int *csr_col, float  *csr_val){
 
-    // sort COO by rows
-    std::sort(coostorage, coostorage + nelements, compareCOOByRow);
+
+    // sort COO by rows NOTE: Already do this in main, resort is useless
+    //std::sort(coostorage, coostorage + nelements, compareCOOByRow);
     memset(csr_row, 0, (rows + 1) * sizeof(int));
     for (int i = 0; i < nelements; i++) {
         csr_row[coostorage[i].arow + 1]++;
@@ -155,6 +171,7 @@ struct COOStorage* matrix_parser(FILE* file, int* rows, int* cols, int* nnz){
 
 // TODO: Delete unnecessary comments and code snippets
 
+// NOTE: This will be left commented since this implementation cannot be sped up.
 //void parallel_cpu_coo(float* results, COOStorage* coomatrix, float*lineRandomVector, int nnz){
 //    #pragma omp parallel
 //    {
@@ -265,10 +282,8 @@ int main(int argc, char const *argv[])
     float results[cols];
     memset(results, 0, cols * sizeof(float));
 
-    // Sort COO for performance
-    // TODO: Find out why sorted COO on CPU is slower
-    // NOTE: DUUUUH race conditions with random access is better than sequentials
-    //std::sort(coomatrix, coomatrix + nnz, compareCOO);
+    // Sort COO
+    std::sort(coomatrix, coomatrix + nnz, compareCOOByRow);
 
 
 
@@ -297,8 +312,8 @@ int main(int argc, char const *argv[])
 
     // TODO: implement COO computation for GPU
     COOStorage* cudastorage;
-    cudaMalloc((void**)&cudastorage, sizeof(COOStorage) * nnz);
-    cudaMemcpy(cudastorage, coomatrix, sizeof(COOStorage) * nnz, cudaMemcpyHostToDevice);
+    cudaCheckError(cudaMalloc((void**)&cudastorage, sizeof(COOStorage) * nnz));
+    cudaCheckError(cudaMemcpy(cudastorage, coomatrix, sizeof(COOStorage) * nnz, cudaMemcpyHostToDevice));
 
 
     // Checking if there are errors cause i don't trust NVIDIA to work without errors
@@ -327,7 +342,7 @@ int main(int argc, char const *argv[])
     TIMER_DEF(2);
     printf("NVDA COO\n");
     for(int i = -WARMUP; i < NITER; i++){
-        cudaMemset(cudaCOOResults, 0, sizeof(float) * cols);
+        cudaCheckError(cudaMemset(cudaCOOResults, 0, sizeof(float) * cols));
         //TIMER_START(2);
         cudaEventRecord(start);
         COO_SpVM_NVDA<<<(int)(nnz + threads - 1)/threads, threads>>>(cudastorage, cudaRandomLineVector, cudaCOOResults, nnz);
@@ -358,9 +373,6 @@ int main(int argc, char const *argv[])
 
     err = cudaGetLastError();
     printf("ErrorMEMCPY: %s\n", cudaGetErrorString(err));
-
-
-
     for(int i = 0; i < cols; i++){
         if(fabs(cudaCheckRes[i] - results[i]) > 5e-1){
             check = false;
@@ -390,6 +402,102 @@ int main(int argc, char const *argv[])
     // Free memory cause now it is useless
     cudaFree(cudastorage);
 
+
+
+    // ----------------------------------------------------------------
+    // - COO cuSparse
+    // ----------------------------------------------------------------
+
+    // I need to allocate the data in the format that cuSparse wants. Yeah i kept the struct just cause if it works don't fix it.
+    // If only this was not the bane of legacy software, note to self first try the vendor libraries in the future
+    int*   coo_row = (int*)malloc(sizeof(int) * nnz);
+    int*   coo_col = (int*)malloc(sizeof(int) * nnz);
+    float* coo_val = (float*)malloc(sizeof(float) * nnz);
+    for (int i = 0; i < nnz; i++) {
+        coo_row[i] = coomatrix[i].arow;
+        coo_col[i] = coomatrix[i].acol;
+        coo_val[i] = coomatrix[i].aval;
+    }
+    int* cudaCoo_row;
+    int* cudaCoo_col;
+    float* cudaCoo_val;
+
+    // allocate everything and copy, also if the data is not sorted the library shoots out a ton of errors
+    cudaMalloc((void**)&cudaCoo_row, sizeof(int) * nnz);
+    cudaMalloc((void**)&cudaCoo_col, sizeof(int) * nnz);
+    cudaMalloc((void**)&cudaCoo_val, sizeof(float) * nnz);
+    cudaMemcpy(cudaCoo_row, coo_row, sizeof(int) * nnz, cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaCoo_col, coo_col, sizeof(int) * nnz, cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaCoo_val, coo_val, sizeof(float) * nnz, cudaMemcpyHostToDevice);
+
+    // Save results to compare, they are prone to errors so i need to check.
+    float* cuSparse_coo_results;
+    cudaMalloc((void**)&cuSparse_coo_results, rows * sizeof(float));
+
+    // Create cuSparse handle
+    cusparseHandle_t cusparse_handle;
+    cusparseCreate(&cusparse_handle);
+
+    // COO descriptor for computation
+    cusparseSpMatDescr_t matCOO;
+    cusparseCreateCoo(&matCOO,
+                    rows, cols, nnz,
+                    cudaCoo_row, cudaCoo_col, cudaCoo_val,
+                    CUSPARSE_INDEX_32I,
+                    CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+
+    cusparseDnVecDescr_t vecX_coo, vecY_coo;
+    cusparseCreateDnVec(&vecX_coo, cols, cudaRandomLineVector, CUDA_R_32F);
+    cusparseCreateDnVec(&vecY_coo, rows, cuSparse_coo_results, CUDA_R_32F);
+
+    float alpha = 1.0f, beta = 0.0f;
+    void*  dBuffer_coo    = NULL;
+    size_t bufferSize_coo = 0;
+    cusparseSpMV_bufferSize(cusparse_handle,
+                            CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            &alpha, matCOO, vecX_coo, &beta, vecY_coo,
+                            CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT,
+                            &bufferSize_coo);
+    cudaMalloc(&dBuffer_coo, bufferSize_coo);
+
+    float CUSPARSE_COO_TIMER[NITER];
+    float CUSPARSE_COO_GFLOPSS[NITER];
+    float CUSPARSE_COO_BANDWIDTH[NITER];
+
+    printf("cuSPARSE COO\n");
+    for (int i = -WARMUP; i < NITER; i++) {
+        cudaMemset(cuSparse_coo_results, 0, sizeof(float) * rows);
+
+        cudaEventRecord(start);
+        cusparseSpMV(cusparse_handle,
+                    CUSPARSE_OPERATION_NON_TRANSPOSE,
+                    &alpha, matCOO, vecX_coo, &beta, vecY_coo,
+                    CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, dBuffer_coo);
+        cudaEventRecord(stop);
+
+        err = cudaEventSynchronize(stop);
+
+        if (i >= 0) {
+            cudaEventElapsedTime(&CUSPARSE_COO_TIMER[i], start, stop);
+            CUSPARSE_COO_GFLOPSS[i]   = gflops(2 * nnz, CUSPARSE_COO_TIMER[i]);
+            CUSPARSE_COO_BANDWIDTH[i] = bandwidthCOOTheoretical(nnz, CUSPARSE_COO_TIMER[i]);
+        }
+    }
+
+    printPerformance(CUSPARSE_COO_TIMER, CUSPARSE_COO_GFLOPSS, CUSPARSE_COO_BANDWIDTH, NITER);
+    double gtime_cusparse_coo = geometric_mean(CUSPARSE_COO_TIMER, NITER);
+    printf("geometric time cusparse coo %f\n", gtime_cusparse_coo);
+
+    // Cleanup COO
+    cusparseDestroySpMat(matCOO);
+    cusparseDestroyDnVec(vecX_coo);
+    cusparseDestroyDnVec(vecY_coo);
+    cudaFree(dBuffer_coo);
+    cudaFree(cudaCoo_row);
+    cudaFree(cudaCoo_col);
+    cudaFree(cudaCoo_val);
+    free(coo_row); free(coo_col); free(coo_val);
+
     // ----------------------------------------------------------------
     // - CSR
     // ----------------------------------------------------------------
@@ -414,7 +522,7 @@ int main(int argc, char const *argv[])
     printf("geometric time csr cpu  %f\n", gtime_csr_cpu);
 
 
-
+    printf("NVDA CSR\n");
     float* cudaCSRResults;
     cudaMalloc((void**)&cudaCSRResults, sizeof(float) * cols);
     cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
@@ -462,8 +570,9 @@ int main(int argc, char const *argv[])
 
     }
 
-    printf("NVDA CSR\n");
     printPerformance(NVDA_CSR_TIMER, NVDA_CSR_GFLOPSS, NVDA_CSR_BANDWIDTH, NITER);
+
+    printf("NVDA CSR Vector\n");
 
     // TODO: Fix this!
     float NVDA_CSRVector_TIMER[NITER];
@@ -471,14 +580,15 @@ int main(int argc, char const *argv[])
     float NVDA_CSRVector_BANDWIDTH[NITER];
     //TIMER_DEF(5);
 
-    int WPP = threads / 32;
     int sharedBytes = threads * sizeof(float);
+    int WPB = threads/32;
+    int blocks = (rows + WPB - 1)/WPB;
 
     for(int i = -WARMUP; i < NITER; i++){
         cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
         //TIMER_START(5);
         cudaEventRecord(start);
-        CSRVector_SpVM_NVDA<<<(rows + WPP - 1)/WPP, threads, sharedBytes>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+        CSRVector_SpVM_NVDA<<<blocks, threads, sharedBytes>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
         cudaEventRecord(stop);
 
         //err = cudaDeviceSynchronize();
@@ -503,10 +613,9 @@ int main(int argc, char const *argv[])
 
     }
     float* cudaCSRVecCheckRes = (float*)malloc(sizeof(float) * cols);
-    //cudaMemcpy(cudaCSRVecCheckRes, cudaCSRResults, sizeof(float) * cols, cudaMemcpyDeviceToHost);
+    cudaMemcpy(cudaCSRVecCheckRes, cudaCSRResults, sizeof(float) * cols, cudaMemcpyDeviceToHost);
 
     printPerformance(NVDA_CSRVector_TIMER, NVDA_CSRVector_GFLOPSS, NVDA_CSRVector_BANDWIDTH, NITER);
-    return 0;
 
     check = true;
     err = cudaDeviceSynchronize();
@@ -517,16 +626,17 @@ int main(int argc, char const *argv[])
 
 
 
-    //for(int i = 0; i < cols; i++){
-    //    if(fabs(cudaCheckRes[i] - results[i]) > 5e-1){
-    //        check = false;
+    for(int i = 0; i < cols; i++){
+        if(fabs(cudaCSRVecCheckRes[i] - results[i]) > 5e-1){
+            check = false;
 
-    //        printf("cuda : %f, cpu : %f\n", cudaCheckRes[i-1], results[i-1]);
-    //        printf("cuda : %f, cpu : %f\n", cudaCheckRes[i], results[i]);
-    //        printf("cuda : %f, cpu : %f\n", cudaCheckRes[i+1], results[i+1]);
-    //        break;
-    //    }
-    //}
+            printf("cuda : %f, cpu : %f\n", cudaCSRVecCheckRes[i-1], results[i-1]);
+            printf("cuda : %f, cpu : %f\n", cudaCSRVecCheckRes[i], results[i]);
+            printf("cuda : %f, cpu : %f\n", cudaCSRVecCheckRes[i+1], results[i+1]);
+            printf("index : %d\n",i);
+            //break;
+        }
+    }
 
     printf("checking res : %d\n", check);
 
@@ -552,6 +662,77 @@ int main(int argc, char const *argv[])
         printf("%f ", NVDA_CSRVector_TIMER[i]);
     }
     printf("\n");
+
+
+    // ----------------------------------------------------------------
+    // - CSR cuSparse
+    // ----------------------------------------------------------------
+    float* cuSparse_csr_results;
+    cudaMalloc((void**)&cuSparse_csr_results, rows * sizeof(float));
+
+
+    // Build CSR descriptor
+    cusparseSpMatDescr_t matCSR;
+    cusparseCreateCsr(&matCSR,
+                    rows, cols, nnz,
+                    cudacsr_row, cudacsr_col, cudacsr_val,
+                    CUSPARSE_INDEX_32I,        // row offset type
+                    CUSPARSE_INDEX_32I,        // col index type
+                    CUSPARSE_INDEX_BASE_ZERO,
+                    CUDA_R_32F);
+
+
+    cusparseDnVecDescr_t vecX_csr, vecY_csr;
+    cusparseCreateDnVec(&vecX_csr, cols, cudaRandomLineVector, CUDA_R_32F);
+    cusparseCreateDnVec(&vecY_csr, rows, cuSparse_csr_results, CUDA_R_32F);
+
+    size_t bufferSize_csr = 0;
+    cusparseSpMV_bufferSize(cusparse_handle,
+                            CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            &alpha, matCSR, vecX_csr, &beta, vecY_csr,
+                            CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT,
+                            &bufferSize_csr);
+    void* dBuffer_csr = NULL;
+    cudaMalloc(&dBuffer_csr, bufferSize_csr);
+
+    float CUSPARSE_CSR_TIMER[NITER];
+    float CUSPARSE_CSR_GFLOPSS[NITER];
+    float CUSPARSE_CSR_BANDWIDTH[NITER];
+
+    printf("cuSPARSE CSR\n");
+    for (int i = -WARMUP; i < NITER; i++) {
+        cudaMemset(cuSparse_csr_results, 0, sizeof(float) * rows);
+
+        cudaEventRecord(start);
+        cusparseSpMV(cusparse_handle,
+                    CUSPARSE_OPERATION_NON_TRANSPOSE,
+                    &alpha, matCSR, vecX_csr, &beta, vecY_csr,
+                    CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, dBuffer_csr);
+        cudaEventRecord(stop);
+
+        err = cudaEventSynchronize(stop);
+
+        if (i >= 0) {
+            cudaEventElapsedTime(&CUSPARSE_CSR_TIMER[i], start, stop);
+            CUSPARSE_CSR_GFLOPSS[i]   = gflops(2 * nnz, CUSPARSE_CSR_TIMER[i]);
+            CUSPARSE_CSR_BANDWIDTH[i] = bandwidthCSRTheoretical(rows, nnz, CUSPARSE_CSR_TIMER[i]);
+        }
+    }
+
+    printPerformance(CUSPARSE_CSR_TIMER, CUSPARSE_CSR_GFLOPSS, CUSPARSE_CSR_BANDWIDTH, NITER);
+    double gtime_cusparse_csr = geometric_mean(CUSPARSE_CSR_TIMER, NITER);
+    printf("geometric time cusparse csr %f\n", gtime_cusparse_csr);
+
+    // Cleanup COO
+    cusparseDestroySpMat(matCSR);
+    cusparseDestroyDnVec(vecX_csr);
+    cusparseDestroyDnVec(vecY_csr);
+    cudaFree(dBuffer_csr);
+    cudaFree(cudacsr_row);
+    cudaFree(cudacsr_col);
+    cudaFree(cudacsr_val);
+
+
 
     // Stop time to solution
     TIMER_STOP(0);
