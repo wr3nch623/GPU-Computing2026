@@ -6,17 +6,15 @@ Implemented:
 - COO
   - COO OpenMP computation
   - COO NVIDIA
+  - cusparse
 - CSR
   - CSR OpenMP
   - CSR Vector
+  - cusparse
   
 - redo time library
 
 Missing:
-- COO
-  - cuSparse 
-- CSR
-  - cuSparse
   - Other stride accesses or warp parallelism implementation
   
   - Fix code

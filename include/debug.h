@@ -1,5 +1,5 @@
 
-#include "types.cpp"
+#include "types.h"
 #include <stdio.h>
 #include <cmath>
 

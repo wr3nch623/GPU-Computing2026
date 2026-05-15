@@ -7,7 +7,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(DCUDA_NVCC_FLAGS -allow-unsupported-compiler)
 include_directories(include)
 
-add_executable(GPU-Computing2026 main.cu)
+add_executable(GPU-Computing2026 main.cu
+	include/performance_functions.cpp
+	include/preprocessing.cpp
+)
 target_link_libraries(GPU-Computing2026 cusparse)
 
 

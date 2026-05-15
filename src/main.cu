@@ -1,8 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <iostream>
-#include <fstream>
-#include <filesystem>
 #include <string.h>
 #include <stdbool.h>
 #include <time.h>
@@ -10,14 +7,10 @@
 #include <algorithm>
 #include <tuple>
 #include <sys/time.h>
-
 #include "include/mean.h"
 #include "include/debug.h"
-#include "src/kernels/kernel.cu"
-#include "include/performance_functions.h"
-#include "include/preprocessing.h"
-
-
+#include "kernels/kernel.cu"
+#include "performance_functions.h"
 #include <cusparse.h>
 
 using namespace std;
@@ -26,6 +19,12 @@ using namespace std;
 #define WARMUP 3
 
 // Time tracking definitions
+
+//#define TIMER_DEF     struct timeval temp_1, temp_2
+//#define TIMER_START   gettimeofday(&temp_1, (struct timezone*)0)
+//#define TIMER_STOP    gettimeofday(&temp_2, (struct timezone*)0)
+//#define TIMER_ELAPSED ((temp_2.tv_sec-temp_1.tv_sec)+(temp_2.tv_usec-temp_1.tv_usec)/1000000.0)
+
 #define TIMER_DEF(n)	 struct timeval temp_1_##n={0,0}, temp_2_##n={0,0}
 #define TIMER_START(n)	 gettimeofday(&temp_1_##n, (struct timezone*)0)
 #define TIMER_STOP(n)	 gettimeofday(&temp_2_##n, (struct timezone*)0)
@@ -54,6 +53,121 @@ void check(cudaError_t err, char const* func, char const* file, int line)
         // std::exit(EXIT_FAILURE);
     }
 }
+
+struct COOStorage* createCOO(int nelements){
+    struct COOStorage* storage = NULL;
+    storage = (COOStorage*)malloc(sizeof(struct COOStorage) * nelements);
+
+    for(int i = 0; i < nelements; i++){
+        storage[i].arow = 0;
+        storage[i].acol = 0;
+        storage[i].aval = 0;
+    }
+
+    return storage;
+   
+}
+
+// Functions that compare rows and columns to sort them in crescent order column or row based.
+bool compareCOO(const COOStorage &a, const COOStorage &b){
+    return std::tie(a.acol, a.arow) < std::tie(b.acol, b.arow);
+}
+
+
+bool compareCOOByRow(const COOStorage &a, const COOStorage &b){
+    return std::tie(a.arow, a.acol) < std::tie(b.arow, b.acol);
+}
+
+
+
+// TODO: When csr implemented fix this function
+void createCSR(COOStorage* coostorage, int nelements, int rows,
+               int *csr_row, int *csr_col, float  *csr_val){
+
+
+    // sort COO by rows NOTE: Already do this in main, resort is useless
+    //std::sort(coostorage, coostorage + nelements, compareCOOByRow);
+    memset(csr_row, 0, (rows + 1) * sizeof(int));
+    for (int i = 0; i < nelements; i++) {
+        csr_row[coostorage[i].arow + 1]++;
+    }
+
+    for(int i = 0; i < rows; i++){
+        csr_row[i+1] += csr_row[i];
+    }
+
+    int *temp = (int *)malloc(rows * sizeof(int));
+    for (int i = 0; i < rows; ++i)
+        temp[i] = csr_row[i];
+
+    for (int i = 0; i < nelements; ++i) {
+        int row = coostorage[i].arow;
+        int idx = temp[row]++;
+        csr_col[idx] = coostorage[i].acol;
+        csr_val[idx] = coostorage[i].aval;
+    }
+
+    free(temp);
+}
+
+struct COOStorage* matrix_parser(FILE* file, int* rows, int* cols, int* nnz){
+    char tempString[10000];
+    bool first = false;
+    float arr[3];
+    struct COOStorage* coomatrix;
+    int i = 0;
+
+    // Read file
+    while(fgets(tempString, 10000, file)){
+        int k, h;
+
+        if(!(tempString[0] == '%')){
+            // Read and populate the array 
+            int matches = sscanf(tempString, "%f %f %f", &arr[0], &arr[1], &arr[2]);
+
+            // Sometimes in the files there is no third number, in this case it is a 1.
+            if(matches == 2){
+                arr[2] = 1;
+            }
+
+            //printf("%f, %f, %f\n",  (int)arr[0], arr[1], arr[2]);
+
+            // Check if the array already was created
+            if(!first){
+                *rows = (int)arr[0];
+                *cols = (int)arr[1];
+                *nnz = (int)arr[2];
+
+                coomatrix = createCOO(*nnz);
+
+
+                first = true;
+                continue;
+            }
+             
+            coomatrix[i].arow = arr[0] - 1;
+            coomatrix[i].acol = arr[1] - 1;
+
+            // If there are only two numbers for each record (e.g. row, col) it is treated as if there were three
+            // but the third is a 1 (e.g row, col, 1) since those formats only save non zero information
+            if(matches == 2)
+                coomatrix[i].aval = 1;
+            // Otherwise do whatever and save it, clearly it has a problem with precision
+            // floats only save up until a certain point and after 1e-8 it does not, but 
+            // its fine i feel... Right?
+            else {
+                coomatrix[i].aval = (float)arr[2];
+                //printf("%f, %f\n", arr[2], coomatrix[i].aval);
+            }
+            i++;            
+            
+        }
+    }
+
+    return coomatrix;
+
+}
+
 
 // TODO: Delete unnecessary comments and code snippets
 
@@ -97,58 +211,7 @@ void parallel_cpu_csr(int *row_ptr, int *col_idx, float *csr_val, int rows, floa
     }
 }
 
-void csvOutput(std::ofstream& csvFile,
-                       const char* matrix_name,
-                       const char* implementation,
-                       int rows, int cols, int nnz,
-                       int threads, int blocks,
-                       float* times_ms,
-                       float* gflops_arr,
-                       float* bandwidth_arr,
-                       int n_iters){
 
-    // Time stats
-    float t_min = 1e30f, t_max = 0.0f, t_sum = 0.0f;
-    for(int i = 0; i < n_iters; i++){
-        if(times_ms[i] < t_min) t_min = times_ms[i];
-        if(times_ms[i] > t_max) t_max = times_ms[i];
-        t_sum += times_ms[i];
-    }
-    float t_avg       = t_sum / n_iters;
-    float t_geomean   = (float)geometric_mean(times_ms, n_iters);
-    float t_stddev    = stddev(times_ms, n_iters);
-
-    // GFLOPS stats
-    float gf_sum = 0.0f;
-    for(int i = 0; i < n_iters; i++) gf_sum += gflops_arr[i];
-    float gf_avg      = gf_sum / n_iters;
-    float gf_geomean  = (float)geometric_mean(gflops_arr, n_iters);
-    float gf_stddev   = stddev(gflops_arr, n_iters);
-
-    // Bandwidth stats
-    float bw_sum = 0.0f;
-    for(int i = 0; i < n_iters; i++) bw_sum += bandwidth_arr[i];
-    float bw_avg      = bw_sum / n_iters;
-    float bw_geomean  = (float)geometric_mean(bandwidth_arr, n_iters);
-    float bw_stddev   = stddev(bandwidth_arr, n_iters);
-
-    // Write row
-    csvFile << matrix_name << "," << implementation << ","
-            << rows << "," << cols << "," << nnz << ","
-            << threads << "," << blocks << ","
-            << std::fixed << std::setprecision(6)
-            << t_min << "," << t_max << "," << t_avg << ","
-            << t_geomean << "," << t_stddev << ","
-            << gf_avg << "," << gf_geomean << "," << gf_stddev << ","
-            << bw_avg << "," << bw_geomean << "," << bw_stddev << "\n";
-
-    // Raw times (quoted, semicolon-separated)
-    //csvFile << "\"";
-    //for(int i = 0; i < n_iters; i++)
-    //    csvFile << std::setprecision(6) << times_ms[i]
-    //            << (i < n_iters - 1 ? ";" : "");
-    //csvFile << "\"\n";
-}
 
 int main(int argc, char const *argv[])
 {
@@ -177,7 +240,7 @@ int main(int argc, char const *argv[])
     std::string filename = "results_SpMV.csv";
     std::ofstream csvFile;
 
-    csvFile.open(filename, std::ios::app);
+    csvFile.open(filename);
 
     if(!csvFile.is_open()){
         printf("something has gone wrong with log file\n");
@@ -190,7 +253,8 @@ int main(int argc, char const *argv[])
         csvFile <<"matrix,implementation,rows,cols,nnz,"
            "threads,blocks,"
            "time_min_ms,time_max_ms,time_avg_ms,time_geomean_ms,time_stddev_ms,"
-           "gflops_avg,gflops_avg_geo,gflops_std,bandwidth_avg_gbs,bandwidth_avg_gbs_geo,bandwidth_std\n";
+           "gflops_avg,gflops_avg_geo,gflops_std,bandwidth_avg_gbs,bandwidth_avg_gbs_geo,bandwidth_std,bytes_theoretical,"
+           "raw_times_ms\n";
 
 
     }
@@ -251,12 +315,11 @@ int main(int argc, char const *argv[])
 
     // CPU Parallel COO implementation
     TIMER_DEF(1);
-    float TIMER[NITER];
+    double TIMER[NITER];
     float gflopss[NITER];
     float bandwidth[NITER];
     for(int i = -WARMUP; i < NITER; i++){
         memset(results, 0, cols * sizeof(float));
-        TIMER_DEF(1);
         TIMER_START(1);
         cpu_coo(results, coomatrix, lineRandomVector, nnz);
         TIMER_STOP(1);
@@ -270,8 +333,7 @@ int main(int argc, char const *argv[])
 
     printPerformance(TIMER, gflopss, bandwidth, NITER);
 
-    csvOutput(csvFile, argv[1], "COO CPU", rows , cols, nnz, 0, 0,
-              (float*)TIMER, gflopss, bandwidth, NITER);
+
 
     double gtime = geometric_mean(TIMER, NITER);
     printf("geometric time cpu coo %f\n", gtime);
@@ -336,8 +398,6 @@ int main(int argc, char const *argv[])
     cudaMemcpy(cudaCheckRes, cudaCOOResults, sizeof(float)*cols, cudaMemcpyDeviceToHost);
 
     printPerformance(NVDA_COO_TIMER, NVDA_COO_GFLOPSS, NVDA_COO_BANDWIDTH, NITER);
-    csvOutput(csvFile, argv[1], "COO NVDA", rows , cols, nnz, threads, ((nnz+threads-1)/threads),
-              NVDA_COO_TIMER, NVDA_COO_GFLOPSS, NVDA_COO_BANDWIDTH, NITER);
 
     err = cudaGetLastError();
     printf("ErrorMEMCPY: %s\n", cudaGetErrorString(err));
@@ -456,11 +516,6 @@ int main(int argc, char const *argv[])
     double gtime_cusparse_coo = geometric_mean(CUSPARSE_COO_TIMER, NITER);
     printf("geometric time cusparse coo %f\n", gtime_cusparse_coo);
 
-    csvOutput(csvFile, argv[1], "COO cuSparse", rows , cols, nnz, 0, 0,
-                CUSPARSE_COO_TIMER, CUSPARSE_COO_GFLOPSS, CUSPARSE_COO_BANDWIDTH, NITER);
-
-
-
     // Cleanup COO
     cusparseDestroySpMat(matCOO);
     cusparseDestroyDnVec(vecX_coo);
@@ -469,45 +524,30 @@ int main(int argc, char const *argv[])
     cudaFree(cudaCoo_row);
     cudaFree(cudaCoo_col);
     cudaFree(cudaCoo_val);
-    cudaFree(cuSparse_coo_results);
     free(coo_row); free(coo_col); free(coo_val);
 
     // ----------------------------------------------------------------
     // - CSR
     // ----------------------------------------------------------------
 
-    // TODO: compute mean squared error or root mean squared error on the results for everyone
 
     createCSR(coomatrix, nnz, rows, csr_row, csr_col, csr_val);
     float cpu_csr_results[cols];
 
     memset(cpu_csr_results, 0, cols * sizeof(float));
-    float CPU_CSR_TIMER[NITER];
-    float CPU_CSR_GFLOPSS[NITER];
-    float CPU_CSR_BANDWIDTH[NITER];
-
+    double CPU_CSR_TIMER[NITER];
+    TIMER_DEF(3);
     // Parallel CPU CSR
     for(int i = -WARMUP; i < NITER; i++){
-        TIMER_DEF(3);
         TIMER_START(3);
         parallel_cpu_csr(csr_row, csr_col, csr_val, rows, lineRandomVector, cpu_csr_results);
         TIMER_STOP(3);
 
-        if(i >= 0) {
-            CPU_CSR_TIMER[i] = TIMER_ELAPSED(3);
-            CPU_CSR_GFLOPSS[i] = gflops(2*nnz, CPU_CSR_TIMER[i]);
-            CPU_CSR_BANDWIDTH[i] = bandwidthCSRTheoretical(rows, nnz, CPU_CSR_TIMER[i]);
-
-        }
+        if(i >= 0) CPU_CSR_TIMER[i] = TIMER_ELAPSED(3);
     }
 
     double gtime_csr_cpu = geometric_mean(CPU_CSR_TIMER, NITER);
     printf("geometric time csr cpu  %f\n", gtime_csr_cpu);
-
-
-    csvOutput(csvFile, argv[1], "CSR CPU", rows , cols, nnz, 0, 0,
-                CPU_CSR_TIMER, CPU_CSR_GFLOPSS, CPU_CSR_BANDWIDTH, NITER);
-
 
 
     printf("NVDA CSR\n");
@@ -515,7 +555,7 @@ int main(int argc, char const *argv[])
     cudaMalloc((void**)&cudaCSRResults, sizeof(float) * cols);
     cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
 
-    //cudaMemcpy(cudaRandomLineVector, lineRandomVector, sizeof(float) * cols, cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaRandomLineVector, lineRandomVector, sizeof(float) * cols, cudaMemcpyHostToDevice);
 
     // Allocation of csr vectors onto CUDA and copy
     int *cudacsr_row, *cudacsr_col;
@@ -559,12 +599,6 @@ int main(int argc, char const *argv[])
     }
 
     printPerformance(NVDA_CSR_TIMER, NVDA_CSR_GFLOPSS, NVDA_CSR_BANDWIDTH, NITER);
-
-    csvOutput(csvFile, argv[1], "CSR NVDA", rows , cols, nnz, threads, ((rows+threads-1)/threads),
-                NVDA_CSR_TIMER, NVDA_CSR_GFLOPSS, NVDA_CSR_BANDWIDTH, NITER);
-
-
-
 
     printf("NVDA CSR Vector\n");
 
@@ -610,11 +644,6 @@ int main(int argc, char const *argv[])
     cudaMemcpy(cudaCSRVecCheckRes, cudaCSRResults, sizeof(float) * cols, cudaMemcpyDeviceToHost);
 
     printPerformance(NVDA_CSRVector_TIMER, NVDA_CSRVector_GFLOPSS, NVDA_CSRVector_BANDWIDTH, NITER);
-
-    csvOutput(csvFile, argv[1], "CSR Vector NVDA", rows , cols, nnz, threads, blocks,
-                NVDA_CSRVector_TIMER, NVDA_CSRVector_GFLOPSS, NVDA_CSRVector_BANDWIDTH, NITER);
-
-
 
     check = true;
     err = cudaDeviceSynchronize();
@@ -719,16 +748,10 @@ int main(int argc, char const *argv[])
     }
 
     printPerformance(CUSPARSE_CSR_TIMER, CUSPARSE_CSR_GFLOPSS, CUSPARSE_CSR_BANDWIDTH, NITER);
-
-    csvOutput(csvFile, argv[1], "CSR cuSparse NVDA", rows , cols, nnz, 0, 0,
-                CUSPARSE_CSR_TIMER, CUSPARSE_CSR_GFLOPSS, CUSPARSE_CSR_BANDWIDTH, NITER);
-
-
-
     double gtime_cusparse_csr = geometric_mean(CUSPARSE_CSR_TIMER, NITER);
     printf("geometric time cusparse csr %f\n", gtime_cusparse_csr);
 
-    // Cleanup CSR
+    // Cleanup COO
     cusparseDestroySpMat(matCSR);
     cusparseDestroyDnVec(vecX_csr);
     cusparseDestroyDnVec(vecY_csr);
@@ -737,14 +760,15 @@ int main(int argc, char const *argv[])
     cudaFree(cudacsr_col);
     cudaFree(cudacsr_val);
 
-    cudaFree(cudaCOOResults);
-    cudaFree(cudaRandomLineVector);
-    cudaFree(cudastorage);
+    printf("matrix,implementation,rows,cols,nnz,"
+           "threads,blocks,"
+           "time_min_ms,time_max_ms,time_avg_ms,time_geomean_ms,time_stddev_ms,"
+           "gflops_avg,gflops_avg_geo,gflops_std,bandwidth_avg_gbs,bandwidth_avg_gbs_geo,bandwidth_std,bytes_theoretical,"
+           "raw_times_ms\n");
 
 
 
 
-    csvFile.close();
     // Stop time to solution
     TIMER_STOP(0);
     float TTSComplete = TIMER_ELAPSED(0);
@@ -757,14 +781,6 @@ int main(int argc, char const *argv[])
     free(coomatrix);    
     
     free(lineRandomVector);
-
-    free(csr_row);
-    free(csr_col);
-    free(csr_val);
-    free(cudaCheckRes);
-
-
-   
 
     return 0;
 }

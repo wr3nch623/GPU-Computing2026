@@ -1,5 +1,6 @@
 #include <iostream>
 #include <stdlib.h>
+#include "performance_functions.h"
 
 // 1.e6 because time is measured in milliseconds, so i need to account for that
 float bandwidthCOOTheoretical(float nnz, float timeElapsed){
