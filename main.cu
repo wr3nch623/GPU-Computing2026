@@ -650,7 +650,7 @@ int main(int argc, char const *argv[])
     float NVDA_CSRVector_RMSE[NITER];
     //TIMER_DEF(5);
 
-    int sharedBytes = threads * sizeof(float);
+    //int sharedBytes = threads * sizeof(float);
     int WPB = threads/32;
     int blocks = (rows + WPB - 1)/WPB;
 
@@ -658,7 +658,8 @@ int main(int argc, char const *argv[])
         cudaMemset(cudaCSRResults, 0, sizeof(float) * cols);
         //TIMER_START(5);
         cudaEventRecord(start);
-        CSRVector_SpVM_NVDA<<<blocks, threads, sharedBytes>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+        //CSRVector_SpVM_NVDA<<<blocks, threads, sharedBytes>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
+        CSRVector_SpVM_NVDA<<<blocks, threads>>>(cudacsr_row, cudacsr_col, cudacsr_val, cudaCSRResults, cudaRandomLineVector, rows);
         cudaEventRecord(stop);
 
         //err = cudaDeviceSynchronize();
