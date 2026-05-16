@@ -65,3 +65,4 @@ Dataset
 .env
 
 *.csv
+*.ipynb

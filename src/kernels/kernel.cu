@@ -39,17 +39,17 @@ __global__ void CSR_SpVM_NVDA(int* csr_row, int* csr_col, float* csr_val, float*
 }
 
 __global__ void CSRVector_SpVM_NVDA(int* csr_row, int* csr_col, float* csr_val, float* results, float* lineVector, int n){
-  extern  __shared__ float vals[];
+  //extern  __shared__ float vals[];
 
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   int warp_id = i/32;
   int lane = i & 31;
 
   if(warp_id < n){
-      vals[threadIdx.x] = 0;
+      //vals[threadIdx.x] = 0;
       float sum = 0;
   for(int j = csr_row[warp_id] + lane; j < csr_row[warp_id+1]; j+=32){
-      vals[threadIdx.x] += csr_val[j] * lineVector[csr_col[j]];
+      sum += csr_val[j] * lineVector[csr_col[j]];
   }
 
   /*
@@ -75,12 +75,13 @@ __global__ void CSRVector_SpVM_NVDA(int* csr_row, int* csr_col, float* csr_val, 
 
   // The reduction does its job
   for(int offset = 16; offset > 0; offset/=2){
-      vals[threadIdx.x] += __shfl_down_sync(0xffffffff, vals[threadIdx.x], offset);
+      //vals[threadIdx.x] += __shfl_down_sync(0xffffffff, vals[threadIdx.x], offset);
+      sum += __shfl_down_sync(0xffffffff, sum, offset);
   }
 
 
   if(lane == 0)
-      results[warp_id] = vals[threadIdx.x];
+      results[warp_id] = sum;
 
   }
 }

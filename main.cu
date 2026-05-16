@@ -651,6 +651,7 @@ int main(int argc, char const *argv[])
     //TIMER_DEF(5);
 
     //int sharedBytes = threads * sizeof(float);
+    threads = 32 * rows;
     int WPB = threads/32;
     int blocks = (rows + WPB - 1)/WPB;
 
