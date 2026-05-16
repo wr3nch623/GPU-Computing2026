@@ -843,6 +843,7 @@ int main(int argc, char const *argv[])
     // Stop time to solution
     TIMER_STOP(0);
     float TTSComplete = TIMER_ELAPSED(0);
+    printf("complete execution time to solution in ms : %f\n", TTSComplete);
 
     //cudaFree(coomatrix);
     // Closing and freeing a bunch of stuff to avoid memory leaks and making valgrind happy
@@ -858,11 +859,6 @@ int main(int argc, char const *argv[])
     free(csr_val);
     free(cudaCheckRes);
     free(cpu_csr_results);
-    free(cudaCSRVecCheckRes);
-    free(csr_row);
-    free(csr_col);
-    free(csr_val);
-    free(cudaCheckRes);
     free(cudaCSRVecCheckRes);
 
    
