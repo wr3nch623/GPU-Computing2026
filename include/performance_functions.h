@@ -6,4 +6,6 @@ float bandwidthCOOTheoretical(float nnz, float timeElapsed);
 float bandwidthCSRTheoretical(float rows, float nnz, float timeElapsed);
 float gflops(float flops, float timeElapsed);
 
+float rmse(float*, float*, int);
+
 #endif
